@@ -182,3 +182,16 @@ func isOutOfFdErr(err error) bool {
 	se, ok := err.(syscall.Errno)
 	return ok && (se == syscall.EMFILE || se == syscall.ENFILE)
 }
+
+// TODO: add fifo support
+// AttachFifo attaches fifo event to sub-reactor
+func (s *server) AttachFifo(fifo *Fifo) {
+	poll := pollmanager.Pick()
+	op := poll.Alloc()
+	op.FD = fifo.fd
+	op.OnRead, op.OnWrite, op.OnHup = nil, nil, fifo.OnHup
+	op.Inputs, op.InputAck = fifo.Inputs, fifo.InputAck
+	op.Outputs, op.OutputAck = fifo.Outputs, fifo.OutputAck
+
+	s.operator = op
+}
