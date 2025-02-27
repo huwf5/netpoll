@@ -26,6 +26,12 @@ type options struct {
 	onConnect    OnConnect
 	onDisconnect OnDisconnect
 	onRequest    OnRequest
+
+	// FIFO
+	onData  OnData
+	onClose OnClose
+	onError OnError
+
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	idleTimeout  time.Duration
@@ -49,6 +55,26 @@ func WithOnConnect(onConnect OnConnect) Option {
 func WithOnDisconnect(onDisconnect OnDisconnect) Option {
 	return Option{func(op *options) {
 		op.onDisconnect = onDisconnect
+	}}
+}
+
+// ------------------------------------------ FIFO ------------------------------------------
+
+func WithOnData(onData OnData) Option {
+	return Option{func(op *options) {
+		op.onData = onData
+	}}
+}
+
+func WithOnClose(onClose OnClose) Option {
+	return Option{func(op *options) {
+		op.onClose = onClose
+	}}
+}
+
+func WithOnError(onError OnError) Option {
+	return Option{func(op *options) {
+		op.onError = onError
 	}}
 }
 

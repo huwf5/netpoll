@@ -112,3 +112,9 @@ type OnDisconnect func(ctx context.Context, connection Connection)
 //
 // Return: error is unused which will be ignored directly.
 type OnRequest func(ctx context.Context, connection Connection) error
+
+// ------------------ FIFO ------------------
+// TODO: Add more callbacks for fifo?
+type OnData func(ctx context.Context, fifo Fifo) error
+type OnClose func(ctx context.Context, fifo Fifo) error
+type OnError func(ctx context.Context, fifo Fifo, err error) error

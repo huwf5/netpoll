@@ -41,6 +41,7 @@ type server struct {
 	opts        *options
 	onQuit      func(err error)
 	connections sync.Map // key=fd, value=connection
+	fifos       sync.Map // key=fd, value=fifo
 }
 
 // Run this server.
@@ -183,15 +184,22 @@ func isOutOfFdErr(err error) bool {
 	return ok && (se == syscall.EMFILE || se == syscall.ENFILE)
 }
 
+// ------------------ FIFO ------------------
+
 // TODO: add fifo support
 // AttachFifo attaches fifo event to sub-reactor
-func (s *server) AttachFifo(fifo *Fifo) {
-	poll := pollmanager.Pick()
-	op := poll.Alloc()
-	op.FD = fifo.fd
-	op.OnRead, op.OnWrite, op.OnHup = nil, nil, fifo.OnHup
-	op.Inputs, op.InputAck = fifo.Inputs, fifo.InputAck
-	op.Outputs, op.OutputAck = fifo.Outputs, fifo.OutputAck
+func (s *server) AttachFifo(path string, mode FifoMode) {
 
-	s.operator = op
+	fifo := new(Fifo)
+	if err := fifo.init(path, mode, s.opts); err != nil {
+		logger.Printf("NETPOLL: attach fifo failed: %v", err)
+		return
+	}
+
+	fifo.AddCloseCallback(func(fifo Fifo) error {
+		s.fifos.Delete(fifo.fd)
+		return nil
+	})
+	s.fifos.Store(fifo.fd, fifo)
+
 }
