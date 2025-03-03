@@ -186,20 +186,22 @@ func isOutOfFdErr(err error) bool {
 
 // ------------------ FIFO ------------------
 
-// TODO: add fifo support
 // AttachFifo attaches fifo event to sub-reactor
-func (s *server) AttachFifo(path string, mode FifoMode) {
+func (s *server) AttachFifo(path string, mode FifoMode) error {
 
-	fifo := new(Fifo)
+	fifo := new(fifo)
 	if err := fifo.init(path, mode, s.opts); err != nil {
 		logger.Printf("NETPOLL: attach fifo failed: %v", err)
-		return
+		return err
 	}
 
+	fd := fifo.FD()
 	fifo.AddCloseCallback(func(fifo Fifo) error {
-		s.fifos.Delete(fifo.fd)
+		s.fifos.Delete(fd)
 		return nil
 	})
-	s.fifos.Store(fifo.fd, fifo)
+	s.fifos.Store(fd, fifo)
 
+	fifo.onProcess()
+	return nil
 }

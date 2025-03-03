@@ -28,9 +28,9 @@ type options struct {
 	onRequest    OnRequest
 
 	// FIFO
-	onData  OnData
-	onClose OnClose
-	onError OnError
+	onData OnData
+	// onClose OnClose
+	// onError OnError
 
 	readTimeout  time.Duration
 	writeTimeout time.Duration
@@ -66,17 +66,17 @@ func WithOnData(onData OnData) Option {
 	}}
 }
 
-func WithOnClose(onClose OnClose) Option {
-	return Option{func(op *options) {
-		op.onClose = onClose
-	}}
-}
+// func WithOnClose(onClose OnClose) Option {
+// 	return Option{func(op *options) {
+// 		op.onClose = onClose
+// 	}}
+// }
 
-func WithOnError(onError OnError) Option {
-	return Option{func(op *options) {
-		op.onError = onError
-	}}
-}
+// func WithOnError(onError OnError) Option {
+// 	return Option{func(op *options) {
+// 		op.onError = onError
+// 	}}
+// }
 
 // WithReadTimeout sets the read timeout of connections.
 func WithReadTimeout(timeout time.Duration) Option {

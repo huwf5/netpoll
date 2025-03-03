@@ -3,15 +3,17 @@ package netpoll
 import (
 	"context"
 	"sync/atomic"
+
+	"github.com/cloudwego/netpoll/internal/runner"
 )
 
-type FifoEvent struct {
-	ctx             context.Context
-	onDataCallback  atomic.Value
-	onCloseCallback atomic.Value
-	onErrorCallback atomic.Value
+type fifoEvent struct {
+	ctx            context.Context
+	onDataCallback atomic.Value
+	// onCloseCallback atomic.Value
+	// onErrorCallback atomic.Value
 
-	closeCallback atomic.Value // value is latest *fifoCallbackNode
+	closeCallbacks atomic.Value // value is latest *fifoCallbackNode
 }
 
 type fifoCallbackNode struct {
@@ -19,46 +21,48 @@ type fifoCallbackNode struct {
 	pre *fifoCallbackNode
 }
 
-func (f *Fifo) SetOnData(onData OnData) error {
+func (f *fifo) SetOnData(onData OnData) error {
 	if onData != nil {
 		f.onDataCallback.Store(onData)
 	}
 	return nil
 }
 
-func (f *Fifo) SetOnClose(onClose OnClose) error {
-	if onClose != nil {
-		f.onCloseCallback.Store(onClose)
-	}
-	return nil
-}
+// func (f *fifo) SetOnClose(onClose OnClose) error {
+// 	if onClose != nil {
+// 		f.onCloseCallback.Store(onClose)
+// 	}
+// 	return nil
+// }
 
-func (f *Fifo) SetOnError(onError OnError) error {
-	if onError != nil {
-		f.onErrorCallback.Store(onError)
-	}
-	return nil
-}
+// func (f *fifo) SetOnError(onError OnError) error {
+// 	if onError != nil {
+// 		f.onErrorCallback.Store(onError)
+// 	}
+// 	return nil
+// }
 
-func (f *Fifo) AddCloseCallback(callback FifoCloseCallback) error {
+func (f *fifo) AddCloseCallback(callback FifoCloseCallback) error {
 	if callback == nil {
 		return nil
 	}
 	cb := &fifoCallbackNode{}
 	cb.fn = callback
-	if pre := f.closeCallback.Load(); pre != nil {
+	if pre := f.closeCallbacks.Load(); pre != nil {
 		cb.pre = pre.(*fifoCallbackNode)
 	}
-	f.closeCallback.Store(cb)
+	f.closeCallbacks.Store(cb)
 	return nil
 }
 
-func (f *Fifo) onPrepare(opts *options) (err error) {
+func (f *fifo) onPrepare(opts *options) error {
 
 	if opts != nil {
 		f.SetOnData(opts.onData)
-		f.SetOnClose(opts.onClose)
-		f.SetOnError(opts.onError)
+		// f.SetOnClose(opts.onClose)
+		// f.SetOnError(opts.onError)
+		f.SetReadTimeout(opts.readTimeout)
+		f.SetWriteTimeout(opts.writeTimeout)
 	}
 
 	if f.ctx == nil {
@@ -68,15 +72,99 @@ func (f *Fifo) onPrepare(opts *options) (err error) {
 	case FifoModeRead:
 		return f.register(PollReadable)
 	case FifoModeWrite:
-		return f.register(PollWritable)
+		// lazy register writable event
+		return nil
 	}
 	return nil
 }
 
-func (f *Fifo) onProcess() {
-	// TODO: implement onProcess
-	onData, _ := f.onDataCallback.Load().(OnData)
-	if onData == nil {
-		return
+func (f *fifo) onProcess() (processed bool) {
+	if !f.lock(fifoProcessing) {
+		return false
 	}
+
+	task := func() {
+		panicked := true
+		defer func() {
+			if !panicked {
+				return
+			}
+			f.unlock(fifoProcessing)
+			f.Close()
+		}()
+	START:
+		// support close callback for user use
+		onData, _ := f.onDataCallback.Load().(OnData)
+		if onData != nil && f.Reader().Len() > 0 {
+			_ = onData(f.ctx, f)
+		}
+
+		var closedBy who
+		for {
+			closedBy = f.status(fifoClosing)
+			if closedBy == user || onData == nil || f.Reader().Len() == 0 {
+				break
+			}
+			_ = onData(f.ctx, f)
+		}
+		if closedBy != none {
+			needDetach := closedBy == user
+			f.closeCallback(false, needDetach)
+			panicked = false
+			return
+		}
+		f.unlock(fifoProcessing)
+
+		if f.status(fifoClosing) != 0 && f.lock(fifoProcessing) {
+			f.closeCallback(false, false)
+			panicked = false
+			return
+		}
+
+		if onData != nil && f.Reader().Len() > 0 && f.lock(fifoProcessing) {
+			goto START
+		}
+		panicked = false
+	}
+	runner.RunTask(f.ctx, task)
+	return true
+}
+
+func (f *fifo) closeCallback(needLock, needDetach bool) (err error) {
+	if needLock && !f.lock(fifoProcessing) {
+		return nil
+	}
+	if needDetach && f.operator.poll != nil {
+		if err := f.operator.Control(PollDetach); err != nil {
+			logger.Printf("NETPOLL: closeCallback[%v,%v] detach operator failed: %v", needLock, needDetach, err)
+		}
+	}
+	latest := f.closeCallbacks.Load()
+	if latest == nil {
+		return nil
+	}
+	for callback := latest.(*fifoCallbackNode); callback != nil; callback = callback.pre {
+		callback.fn(f)
+	}
+	return nil
+}
+
+func (f *fifo) register(event PollEvent) (err error) {
+	switch f.mode {
+	case FifoModeRead:
+		if event != PollReadable && event != PollDetach {
+			return Exception(ErrUnsupported, "write event on read-only FIFO")
+		}
+	case FifoModeWrite:
+		if event != PollWritable && event != PollDetach {
+			return Exception(ErrUnsupported, "read event on write-only FIFO")
+		}
+	}
+
+	err = f.operator.Control(event)
+	if err != nil {
+		logger.Printf("NETPOLL: FIFO register failed: %v", err)
+		return Exception(ErrConnClosed, err.Error())
+	}
+	return nil
 }
