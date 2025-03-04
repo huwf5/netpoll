@@ -182,3 +182,7 @@ func (evl *eventLoop) quit(err error) {
 	default:
 	}
 }
+
+func (evl *eventLoop) AttachFifo(path string, mode FifoMode) error {
+	return evl.svr.AttachFifo(path, mode)
+}

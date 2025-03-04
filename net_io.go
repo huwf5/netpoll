@@ -37,9 +37,20 @@ func ioread(fd int, bs [][]byte, ivs []syscall.Iovec) (n int, err error) {
 // - n: n == 0 but err == nil, retry syscall
 // - err: if not nil, connection should be closed.
 func iosend(fd int, bs [][]byte, ivs []syscall.Iovec, zerocopy bool) (n int, err error) {
-	n, err = sendmsg(fd, bs, ivs, zerocopy)
+	// TODO:  check fifo fd with efficient way
+	if isFifo(fd) {
+		n, err = writev(fd, bs, ivs)
+	} else {
+		n, err = sendmsg(fd, bs, ivs, zerocopy)
+	}
 	if err == syscall.EAGAIN {
 		return 0, nil
 	}
 	return n, err
+}
+
+func isFifo(fd int) bool {
+	var stat syscall.Stat_t
+	err := syscall.Fstat(fd, &stat)
+	return err == nil && stat.Mode&syscall.S_IFIFO != 0
 }

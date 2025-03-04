@@ -10,9 +10,6 @@ import (
 type fifoEvent struct {
 	ctx            context.Context
 	onDataCallback atomic.Value
-	// onCloseCallback atomic.Value
-	// onErrorCallback atomic.Value
-
 	closeCallbacks atomic.Value // value is latest *fifoCallbackNode
 }
 
@@ -27,20 +24,6 @@ func (f *fifo) SetOnData(onData OnData) error {
 	}
 	return nil
 }
-
-// func (f *fifo) SetOnClose(onClose OnClose) error {
-// 	if onClose != nil {
-// 		f.onCloseCallback.Store(onClose)
-// 	}
-// 	return nil
-// }
-
-// func (f *fifo) SetOnError(onError OnError) error {
-// 	if onError != nil {
-// 		f.onErrorCallback.Store(onError)
-// 	}
-// 	return nil
-// }
 
 func (f *fifo) AddCloseCallback(callback FifoCloseCallback) error {
 	if callback == nil {
@@ -59,8 +42,6 @@ func (f *fifo) onPrepare(opts *options) error {
 
 	if opts != nil {
 		f.SetOnData(opts.onData)
-		// f.SetOnClose(opts.onClose)
-		// f.SetOnError(opts.onError)
 		f.SetReadTimeout(opts.readTimeout)
 		f.SetWriteTimeout(opts.writeTimeout)
 	}

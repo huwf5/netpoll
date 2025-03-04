@@ -464,7 +464,7 @@ func (f *fifo) flush() error {
 	}
 
 	bs := f.outputBuffer.GetBytes(f.outputBarrier.bs)
-	n, err := sendmsg(f.fd, bs, f.outputBarrier.ivs, false)
+	n, err := writev(f.fd, bs, f.outputBarrier.ivs)
 	if err != nil && err != syscall.EAGAIN {
 		return Exception(err, "when flush")
 	}

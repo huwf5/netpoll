@@ -152,7 +152,7 @@ func (p *defaultPoll) handler(events []epollevent) (closed bool) {
 				// for non-connection
 				operator.OnRead(p)
 			} else if operator.Inputs != nil {
-				// for connection
+				// for connection and fifo
 				bs := operator.Inputs(p.barriers[i].bs)
 				if len(bs) > 0 {
 					n, err := ioread(operator.FD, bs, p.barriers[i].ivs)
@@ -198,7 +198,7 @@ func (p *defaultPoll) handler(events []epollevent) (closed bool) {
 				// for non-connection
 				operator.OnWrite(p)
 			} else if operator.Outputs != nil {
-				// for connection
+				// for connection and fifo
 				bs, supportZeroCopy := operator.Outputs(p.barriers[i].bs)
 				if len(bs) > 0 {
 					// TODO: Let the upper layer pass in whether to use ZeroCopy.

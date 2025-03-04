@@ -1,6 +1,8 @@
 package netpoll
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+)
 
 // ------------------------------------------ implement FDOperator ------------------------------------------
 
@@ -91,7 +93,7 @@ func (f *fifo) inputAck(n int) (err error) {
 	}
 
 	needTrigger := true
-	if length == n { // first start onRequest
+	if length == n { // first start
 		processed := f.onProcess()
 		needTrigger = !processed
 	}
