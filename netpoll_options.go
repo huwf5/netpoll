@@ -28,7 +28,8 @@ type options struct {
 	onRequest    OnRequest
 
 	// FIFO
-	onData OnData
+	onFifoRead     OnFifoRead     // read only
+	onFifoTransfer OnFifoTransfer // read and write
 
 	readTimeout  time.Duration
 	writeTimeout time.Duration
@@ -58,9 +59,15 @@ func WithOnDisconnect(onDisconnect OnDisconnect) Option {
 
 // ------------------------------------------ FIFO ------------------------------------------
 
-func WithOnData(onData OnData) Option {
+func WithOnFifoRead(onFifoRead OnFifoRead) Option {
 	return Option{func(op *options) {
-		op.onData = onData
+		op.onFifoRead = onFifoRead
+	}}
+}
+
+func WithOnFifoTransfer(onFifoTransfer OnFifoTransfer) Option {
+	return Option{func(op *options) {
+		op.onFifoTransfer = onFifoTransfer
 	}}
 }
 

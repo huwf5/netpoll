@@ -114,8 +114,6 @@ type OnDisconnect func(ctx context.Context, connection Connection)
 type OnRequest func(ctx context.Context, connection Connection) error
 
 // ------------------ FIFO ------------------
-// TODO: Add more callbacks for fifo?
-type OnData func(ctx context.Context, fifo Fifo) error
+type OnFifoRead func(ctx context.Context, fifo ReadFifo) error
 
-// type OnClose func(ctx context.Context, fifo Fifo) error
-// type OnError func(ctx context.Context, fifo Fifo, err error) error
+type OnFifoTransfer func(ctx context.Context, fifo FifoConnection) error

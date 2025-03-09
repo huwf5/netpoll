@@ -5,6 +5,21 @@ import (
 	"sync/atomic"
 )
 
+/*
+	FIFO State Diagram
++----------------+          +--------------+
+| fifoProcessing |-------->| fifoFlushing  |
++-------+--------+         +-------+------+
+		|
+		|                +----------------+
+		+--------------->|  fifoClosing   |
+	                	+----------------+
+
+- "fifoProcessing" locks onFifoRead handler, make sure there is only one onFifoRead handler running at a time
+- "fifoFlushing" locks outputBuffer, it will be used in writeFifo
+- "fifoClosing" should wait for processing finished, then call the closeCallback
+*/
+
 const (
 	fifoClosing key = iota
 	fifoProcessing
@@ -13,6 +28,8 @@ const (
 )
 
 type fifoLocker struct {
+	// keychain use for lock/unlock/stop operation by who.
+	// 0 means unlock, 1 means locked, 2 means stop.
 	keychain [fifoTotal]int32
 }
 

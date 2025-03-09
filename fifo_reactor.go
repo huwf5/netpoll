@@ -2,25 +2,26 @@ package netpoll
 
 import (
 	"sync/atomic"
+
+	"github.com/cloudwego/netpoll/internal/runner"
 )
 
-// ------------------------------------------ implement FDOperator ------------------------------------------
+// this file implements the event handling of readFifo and writeFifo
 
-// onHup means close by poller.
-func (f *fifo) onHup(p Poll) error {
+// ------------------------------------------ readFifo's event handling ------------------------------------------
+
+// onHup means close by poller
+func (f *readFifo) onHup(p Poll) error {
 	if !f.closeBy(poller) {
 		return nil
 	}
 
-	switch f.mode {
-	case FifoModeRead:
-		f.triggerRead(Exception(ErrEOF, "peer close"))
-	case FifoModeWrite:
-		f.triggerWrite(Exception(ErrConnClosed, "peer close"))
-	}
+	f.triggerRead(Exception(ErrEOF, "peer close"))
 
-	onData := f.onDataCallback.Load()
-	needCloseByUser := onData == nil
+	OnFifoRead := f.onFifoReadCallback.Load()
+	// when user not set onFifoRead, it should be closed by user
+	// otherwise, it should be closed actively
+	needCloseByUser := OnFifoRead == nil
 	if !needCloseByUser {
 		// already PollDetach when call OnHup
 		f.closeCallback(true, false)
@@ -29,15 +30,10 @@ func (f *fifo) onHup(p Poll) error {
 	return nil
 }
 
-// onClose means close by user.
-func (f *fifo) onClose() error {
+// onClose means close by user
+func (f *readFifo) onClose() error {
 	if f.closeBy(user) {
-		switch f.mode {
-		case FifoModeRead:
-			f.triggerRead(Exception(ErrConnClosed, "self close"))
-		case FifoModeWrite:
-			f.triggerWrite(Exception(ErrConnClosed, "self close"))
-		}
+		f.triggerRead(Exception(ErrConnClosed, "self close"))
 		f.closeCallback(true, true)
 		return nil
 	}
@@ -49,31 +45,12 @@ func (f *fifo) onClose() error {
 	return f.closeCallback(true, false)
 }
 
-// closeBuffer recycle input & output LinkBuffer.
-func (f *fifo) closeBuffer() {
-	onData, _ := f.onDataCallback.Load().(OnData)
-
-	switch f.mode {
-	case FifoModeRead:
-		if f.inputBuffer.Len() == 0 || onData != nil {
-			f.inputBuffer.Close()
-		}
-	case FifoModeWrite:
-		if f.outputBuffer.Len() == 0 || onData != nil {
-			f.outputBuffer.Close()
-			barrierPool.Put(f.outputBarrier)
-		}
-	}
-}
-
-// inputs implements FDOperator.Inputs.
-func (f *fifo) inputs(vs [][]byte) (rs [][]byte) {
+func (f *readFifo) inputs(vs [][]byte) (rs [][]byte) {
 	vs[0] = f.inputBuffer.book(f.bookSize, f.maxSize)
 	return vs[:1]
 }
 
-// inputAck implements FDOperator.InputAck.
-func (f *fifo) inputAck(n int) (err error) {
+func (f *readFifo) inputAck(n int) (err error) {
 	if n <= 0 {
 		f.inputBuffer.bookAck(0)
 		return nil
@@ -104,9 +81,100 @@ func (f *fifo) inputAck(n int) (err error) {
 	return nil
 }
 
-// outputs implements FDOperator.Outputs.
-func (f *fifo) outputs(vs [][]byte) (rs [][]byte, supportZeroCopy bool) {
+func (f *readFifo) closeBuffer() {
+	OnFifoRead, _ := f.onFifoReadCallback.Load().(OnFifoRead)
+	if f.inputBuffer.Len() == 0 || OnFifoRead != nil {
+		f.inputBuffer.Close()
+	}
+}
+
+func (f *readFifo) onProcess() (processed bool) {
+	if !f.lock(fifoProcessing) {
+		return false
+	}
+
+	task := func() {
+		panicked := true
+		defer func() {
+			if !panicked {
+				return
+			}
+			f.unlock(fifoProcessing)
+			f.Close()
+		}()
+	START:
+		// support close callback for user use
+		onFifoRead, _ := f.onFifoReadCallback.Load().(OnFifoRead)
+		if onFifoRead != nil && f.Reader().Len() > 0 {
+			_ = onFifoRead(f.ctx, f)
+		}
+
+		var closedBy who
+		for {
+			closedBy = f.status(fifoClosing)
+			if closedBy == user || onFifoRead == nil || f.Reader().Len() == 0 {
+				break
+			}
+			_ = onFifoRead(f.ctx, f)
+		}
+		if closedBy != none {
+			needDetach := closedBy == user
+			f.closeCallback(false, needDetach)
+			panicked = false
+			return
+		}
+		f.unlock(fifoProcessing)
+
+		if f.status(fifoClosing) != 0 && f.lock(fifoProcessing) {
+			f.closeCallback(false, false)
+			panicked = false
+			return
+		}
+
+		if onFifoRead != nil && f.Reader().Len() > 0 && f.lock(fifoProcessing) {
+			goto START
+		}
+		panicked = false
+	}
+	runner.RunTask(f.ctx, task)
+	return true
+}
+
+// ------------------------------------------ end of readFifo's event handling ------------------------------------------
+
+// ------------------------------------------ writeFifo's event handling ------------------------------------------
+
+// onHup means close by poller
+func (f *writeFifo) onHup(p Poll) error {
+	if !f.closeBy(poller) {
+		return nil
+	}
+
+	f.triggerWrite(Exception(ErrEOF, "peer close"))
+
+	f.closeCallback(true, false)
+
+	return nil
+}
+
+// onClose means close by user
+func (f *writeFifo) onClose() error {
+	if f.closeBy(user) {
+		f.triggerWrite(Exception(ErrConnClosed, "self close"))
+		f.closeCallback(true, true)
+		return nil
+	}
+
+	// closed by poller
+	// still need to change closing status to `user` since OnProcess should not be processed again
+	f.force(fifoClosing, user)
+
+	return f.closeCallback(true, false)
+}
+
+func (f *writeFifo) outputs(vs [][]byte) (rs [][]byte, supportZeroCopy bool) {
 	if f.outputBuffer.IsEmpty() {
+		// means no data to write
 		f.detachWrite()
 		return rs, false
 	}
@@ -115,20 +183,30 @@ func (f *fifo) outputs(vs [][]byte) (rs [][]byte, supportZeroCopy bool) {
 }
 
 // outputAck implements FDOperator.OutputAck.
-func (f *fifo) outputAck(n int) (err error) {
+func (f *writeFifo) outputAck(n int) (err error) {
 	if n > 0 {
 		f.outputBuffer.Skip(n)
 		f.outputBuffer.Release()
 	}
 
 	if f.outputBuffer.IsEmpty() {
+		// means no data to write
 		f.detachWrite()
 	}
 	return nil
 }
 
+func (f *writeFifo) closeBuffer() {
+	// writeFifo is used as part of a FifoConnection,
+	// so it should be actively closed
+	f.outputBuffer.Close()
+	barrierPool.Put(f.outputBarrier)
+}
+
 // detachWrite removes the write event from the poller and triggers the write operation.
-func (f *fifo) detachWrite() {
+func (f *writeFifo) detachWrite() {
 	f.operator.Control(PollDetach)
 	f.triggerWrite(nil)
 }
+
+// ------------------------------------------ end of writeFifo's event handling ------------------------------------------
