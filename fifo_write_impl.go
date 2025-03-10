@@ -19,9 +19,9 @@ type writeFifo struct {
 }
 
 var (
-	_ BaseFifo  = &writeFifo{}
-	_ Writer    = &writeFifo{}
-	_ WriteFifo = &writeFifo{}
+	_ BaseFifo   = &writeFifo{}
+	_ Writer     = &writeFifo{}
+	_ FifoWriter = &writeFifo{}
 )
 
 // ------------------------------------------ implement BaseFifo ------------------------------------------
@@ -169,12 +169,6 @@ func (f *writeFifo) initFinalizer() {
 			}
 		}
 
-		// TODO: decide whether to remove the fifo file
-		// if f.path != "" {
-		// 	if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-		// 		logger.Printf("NETPOLL: FIFO remove file failed: %v", err)
-		// 	}
-		// }
 		f.closeBuffer()
 		return nil
 	})

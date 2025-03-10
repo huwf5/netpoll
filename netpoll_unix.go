@@ -19,6 +19,8 @@ package netpoll
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -135,9 +137,28 @@ func NewEventLoop(onRequest OnRequest, ops ...Option) (EventLoop, error) {
 
 type eventLoop struct {
 	sync.Mutex
-	opts *options
-	svr  *server
-	stop chan error
+	opts        *options
+	svr         *server
+	fifoManager *fifoManager
+	stop        chan error
+
+	svrRunning  bool
+	fifoRunning bool
+	forceQuit   bool
+}
+
+func (evl *eventLoop) ServeFifo() error {
+	evl.Lock()
+	if evl.fifoManager == nil {
+		evl.fifoManager = newFifoManager(evl.opts, evl.onFifoManagerQuit)
+	}
+	evl.fifoRunning = true
+	evl.Unlock()
+
+	err := evl.waitQuit()
+	// ensure evl will not be finalized until Serve returns
+	runtime.SetFinalizer(evl, nil)
+	return err
 }
 
 // Serve implements EventLoop.
@@ -147,7 +168,33 @@ func (evl *eventLoop) Serve(ln net.Listener) error {
 		return err
 	}
 	evl.Lock()
-	evl.svr = newServer(npln, evl.opts, evl.quit)
+	// initialize server
+	evl.svr = newServer(npln, evl.opts, evl.onServerQuit)
+	evl.svrRunning = true
+
+	evl.svr.Run()
+	evl.Unlock()
+
+	err = evl.waitQuit()
+	// ensure evl will not be finalized until Serve returns
+	runtime.SetFinalizer(evl, nil)
+	return err
+}
+
+func (evl *eventLoop) ServeAll(ln net.Listener) error {
+	npln, err := ConvertListener(ln)
+	if err != nil {
+		return err
+	}
+
+	evl.Lock()
+
+	evl.svr = newServer(npln, evl.opts, evl.onServerQuit)
+	evl.svrRunning = true
+
+	evl.fifoManager = newFifoManager(evl.opts, evl.onFifoManagerQuit)
+	evl.fifoRunning = true
+
 	evl.svr.Run()
 	evl.Unlock()
 
@@ -160,15 +207,39 @@ func (evl *eventLoop) Serve(ln net.Listener) error {
 // Shutdown signals a shutdown a begins server closing.
 func (evl *eventLoop) Shutdown(ctx context.Context) error {
 	evl.Lock()
+	// set forceQuit to true
+	evl.forceQuit = true
+
 	svr := evl.svr
+	fifoManager := evl.fifoManager
 	evl.svr = nil
+	evl.fifoManager = nil
+
+	evl.svrRunning = false
+	evl.fifoRunning = false
 	evl.Unlock()
 
-	if svr == nil {
+	var svrErr, fifoErr error
+	if svr != nil {
+		svrErr = svr.Close(ctx)
+	}
+	if fifoManager != nil {
+		fifoErr = fifoManager.Close()
+	}
+
+	evl.quit(nil)
+
+	// combine errors
+	if svrErr == nil && fifoErr == nil {
 		return nil
 	}
-	evl.quit(nil)
-	return svr.Close(ctx)
+	if svrErr == nil {
+		return fifoErr
+	}
+	if fifoErr == nil {
+		return svrErr
+	}
+	return fmt.Errorf("failed to close server and fifo manager: %w, %w", svrErr, fifoErr)
 }
 
 // waitQuit waits for a quit signal
@@ -182,7 +253,53 @@ func (evl *eventLoop) quit(err error) {
 	default:
 	}
 }
+func (evl *eventLoop) onServerQuit(err error) {
+	evl.Lock()
+	defer evl.Unlock()
+	evl.svrRunning = false
+	if err != nil {
+		logger.Printf("Netpoll: server quit with error: %v", err)
+	}
 
-func (evl *eventLoop) AttachFifo(path string, mode FifoMode) error {
-	return evl.svr.AttachFifo(path, mode)
+	evl.checkQuit(err)
+}
+
+func (evl *eventLoop) onFifoManagerQuit(err error) {
+	evl.Lock()
+	defer evl.Unlock()
+	evl.fifoRunning = false
+	if err != nil {
+		logger.Printf("Netpoll: fifo manager quit with error: %v", err)
+	}
+
+	evl.checkQuit(err)
+}
+
+func (evl *eventLoop) checkQuit(err error) {
+	// if set forceQuit, quit immediately
+	// or if server and fifo manager are not running, quit the event loop
+	if evl.forceQuit || (!evl.svrRunning && !evl.fifoRunning) {
+		evl.quit(err)
+	}
+}
+
+func (evl *eventLoop) AttachReadFifo(path string) error {
+	if evl.fifoManager == nil {
+		return errors.New("fifo manager not initialized")
+	}
+	return evl.fifoManager.AttachReadFifo(path)
+}
+
+func (evl *eventLoop) GenerateWriteFifo(path string) (FifoWriter, error) {
+	if evl.fifoManager == nil {
+		return nil, errors.New("fifo manager not initialized")
+	}
+	return evl.fifoManager.GenerateWriteFifo(path)
+}
+
+func (evl *eventLoop) AttachFifoConnection(readerPath string, writerPath string) error {
+	if evl.fifoManager == nil {
+		return errors.New("fifo manager not initialized")
+	}
+	return evl.fifoManager.AttachFifoConnection(readerPath, writerPath)
 }

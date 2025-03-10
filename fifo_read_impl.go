@@ -11,6 +11,8 @@ import (
 type readFifo struct {
 	baseFifo
 
+	onFifoReadCallback atomic.Value
+
 	readTimeout  time.Duration
 	readTimer    *time.Timer
 	readTrigger  chan error
@@ -23,9 +25,9 @@ type readFifo struct {
 }
 
 var (
-	_ BaseFifo = &readFifo{}
-	_ Reader   = &readFifo{}
-	_ ReadFifo = &readFifo{}
+	_ BaseFifo   = &readFifo{}
+	_ Reader     = &readFifo{}
+	_ FifoReader = &readFifo{}
 )
 
 // ------------------------------------------ implement BaseFifo ------------------------------------------
@@ -170,6 +172,13 @@ func (f *readFifo) SetReadTimeout(timeout time.Duration) error {
 	return nil
 }
 
+func (f *readFifo) SetOnFifoRead(onFifoRead OnFifoRead) error {
+	if onFifoRead != nil {
+		f.onFifoReadCallback.Store(onFifoRead)
+	}
+	return nil
+}
+
 // ------------------------------------------ private methods ------------------------------------------
 
 // init initializes the read FIFO
@@ -235,12 +244,6 @@ func (f *readFifo) initFinalizer() {
 			}
 		}
 
-		// TODO: decide whether to remove the fifo file
-		// if f.path != "" {
-		// 	if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
-		// 		logger.Printf("NETPOLL: FIFO remove file failed: %v", err)
-		// 	}
-		// }
 		f.closeBuffer()
 		return nil
 	})

@@ -32,6 +32,17 @@ type EventLoop interface {
 	// Argument: ctx set the waiting deadline, after which an error will be returned,
 	// but will not force the closing of connections in progress.
 	Shutdown(ctx context.Context) error
+
+	// ServeFifo is used to serve fifo connections.
+	ServeFifo() error
+	ServeAll(ln net.Listener) error
+
+	// AttachReadFifo is used to attach a fifo connection to the event loop.
+	AttachReadFifo(path string) error
+
+	// GenerateWriteFifo is used to generate a fifo writer.
+	GenerateWriteFifo(path string) (FifoWriter, error)
+	AttachFifoConnection(readerPath string, writerPath string) error
 }
 
 /* The Connection Callback Sequence Diagram
@@ -114,6 +125,6 @@ type OnDisconnect func(ctx context.Context, connection Connection)
 type OnRequest func(ctx context.Context, connection Connection) error
 
 // ------------------ FIFO ------------------
-type OnFifoRead func(ctx context.Context, fifo ReadFifo) error
+type OnFifoRead func(ctx context.Context, fifo FifoReader) error
 
 type OnFifoTransfer func(ctx context.Context, fifo FifoConnection) error

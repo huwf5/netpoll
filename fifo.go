@@ -13,9 +13,10 @@ type FifoConnectionCloseCallback func(fifo FifoConnection) error
 type BaseFifo interface {
 	Close() error
 	AddCloseCallback(callback FifoCloseCallback) error // fifoEvent implements this method
+	// user is responsible for removing the fifo file
 }
 
-type FifoReader interface {
+type ReadableFifo interface {
 	FD() int
 	Path() string
 
@@ -24,7 +25,7 @@ type FifoReader interface {
 	SetReadTimeout(timeout time.Duration) error
 }
 
-type FifoWriter interface {
+type WriteableFifo interface {
 	FD() int
 	Path() string
 
@@ -33,28 +34,28 @@ type FifoWriter interface {
 	SetWriteTimeout(timeout time.Duration) error
 }
 
-type ReadFifo interface {
+type FifoReader interface {
 	BaseFifo
-	FifoReader
+	ReadableFifo
 
 	SetOnFifoRead(onFifoRead OnFifoRead) error
 }
 
-type WriteFifo interface {
+type FifoWriter interface {
 	BaseFifo
-	FifoWriter
+	WriteableFifo
 }
 
 type FifoConnection interface {
-	FD() (readerFD int, writerFD int)
-	Path() (readerPath string, writerPath string)
+	GetFDs() (readerFD int, writerFD int)
+	GetPaths() (readerPath string, writerPath string)
 
 	// BaseFifo
 	Close() error
 	AddCloseCallback(callback FifoConnectionCloseCallback) error
 
-	Reader() ReadFifo
-	Writer() WriteFifo
+	GetReader() FifoReader
+	GetWriter() FifoWriter
 
 	Read(b []byte) (n int, err error)
 	Write(b []byte) (n int, err error)

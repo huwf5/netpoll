@@ -1,5 +1,22 @@
 package netpoll
 
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"testing"
+	"time"
+)
+
+// TODO:
+// - [] test ReadFifo
+// - [] test WriteFifo
+// - [] test FifoConnection
+// - [] test FifoManager
+// - [] test EventLoop's interface for fifo
+
 // import (
 // 	"bytes"
 // 	"context"
@@ -13,23 +30,133 @@ package netpoll
 // 	"time"
 // )
 
-// // TODO: Benchmark the performance of fifo
-// func BenchmarkFifoReadWrite(b *testing.B) {
+func beforeTest() (dir string) {
+	// create tmp fifo file
+	dir, err := os.MkdirTemp("", "fifo_test")
+	if err != nil {
+		panic(err)
+	}
+	return dir
+}
 
-// }
+func afterTest(dir string) {
+	os.RemoveAll(dir)
+}
 
-// func beforeTest() (dir string) {
-// 	// create tmp fifo file
-// 	dir, err := os.MkdirTemp("", "fifo_test")
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// 	return dir
-// }
+// TestReadFifo tests the fifoReader's read functionality
+// it will read the messages from the fifo file and check if the messages are received in the correct order
+func TestReadFifo(t *testing.T) {
+	dir := beforeTest()
+	defer afterTest(dir)
 
-// func afterTest(dir string) {
-// 	os.RemoveAll(dir)
-// }
+	fifoPath := filepath.Join(dir, "readFifo")
+
+	// for testing
+	testMessages := []string{
+		"First message",
+		"Second message with more data",
+		"Third message",
+		"Fourth message is longer to test different buffer sizes",
+		"Fifth message is the last one",
+	}
+	var expectedMessages = len(testMessages)
+
+	eventLoopDone := make(chan struct{}) // mark the event loop is done
+	dataReceived := make(chan []byte, expectedMessages)
+
+	var wg sync.WaitGroup
+	wg.Add(expectedMessages)
+
+	// set options
+	opts := &options{}
+	// reading logic
+	opts.onFifoRead = func(ctx context.Context, fifo FifoReader) error {
+		// check if there is data to read
+		if fifo.Reader().Len() == 0 {
+			return nil
+		}
+
+		// read data
+		data := make([]byte, fifo.Reader().Len())
+		n, err := fifo.Read(data)
+		MustNil(t, err)
+		Equal(t, n, len(data))
+
+		// send data to channel
+		dataReceived <- data[:n]
+		wg.Done() // mark the one message is received
+		return nil
+	}
+
+	evl, err := NewEventLoop(opts.onRequest, WithOnFifoRead(opts.onFifoRead))
+	MustNil(t, err)
+
+	// start the event loop for fifoReader
+	go func() {
+		defer close(eventLoopDone)  // close the channel when the event loop is done
+		MustNil(t, evl.ServeFifo()) // block here
+	}()
+
+	// wait for the event loop to get ready
+	time.Sleep(100 * time.Millisecond)
+
+	// attach the fifoReader to the event loop
+	MustNil(t, evl.AttachReadFifo(fifoPath))
+
+	// write to fifo
+	go func() {
+		f, err := os.OpenFile(fifoPath, os.O_WRONLY, 0666)
+		MustNil(t, err)
+		defer f.Close()
+
+		for _, msg := range testMessages {
+			_, err := f.WriteString(msg)
+			MustNil(t, err)
+			// wait for the event loop to process the message
+			time.Sleep(10 * time.Millisecond)
+		}
+
+	}()
+
+	timeout := time.After(5 * time.Second)
+
+	done := make(chan struct{})
+	// wait for the event loop to finish
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// success
+	case <-timeout:
+		t.Fatalf("timeout waiting for fifoReader to finish")
+	}
+
+	// collect the received messages
+	receivedMessages := make([]string, 0, expectedMessages)
+	close(dataReceived)
+
+	for data := range dataReceived {
+		receivedMessages = append(receivedMessages, string(data))
+	}
+
+	Equal(t, len(receivedMessages), expectedMessages)
+
+	sort.Strings(receivedMessages)
+	sort.Strings(testMessages)
+
+	for i, msg := range receivedMessages {
+		Equal(t, msg, testMessages[i])
+	}
+
+	// close the event loop
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	MustNil(t, evl.Shutdown(ctx))
+
+}
 
 // func TestFifoBasicReadWrite(t *testing.T) {
 // 	dir := beforeTest()

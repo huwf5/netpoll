@@ -8,24 +8,9 @@ import (
 type fifoEvent struct {
 	ctx context.Context
 
-	onFifoReadCallback     atomic.Value
-	onFifoTransferCallback atomic.Value
-
 	closeCallbacks atomic.Value // value is latest *fifoCallbackNode
-}
 
-func (f *fifoEvent) SetOnFifoRead(onFifoRead OnFifoRead) error {
-	if onFifoRead != nil {
-		f.onFifoReadCallback.Store(onFifoRead)
-	}
-	return nil
-}
-
-func (f *fifoEvent) SetOnFifoTransfer(onFifoTransfer OnFifoTransfer) error {
-	if onFifoTransfer != nil {
-		f.onFifoTransferCallback.Store(onFifoTransfer)
-	}
-	return nil
+	// onFifoReadCallback is located in readFifo
 }
 
 type fifoCallbackNode struct {

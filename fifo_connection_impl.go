@@ -7,8 +7,12 @@ import (
 )
 
 type fifoConnection struct {
-	reader         *readFifo
-	writer         *writeFifo
+	reader *readFifo
+	writer *writeFifo
+
+	ctx                    context.Context //TODO: whether to delete this field?
+	onFifoTransferCallback atomic.Value
+
 	closeCallbacks atomic.Value // value is latest *fifoConnectionCallbackNode
 }
 
@@ -58,19 +62,19 @@ func (f *fifoConnection) closeCallback() {
 
 // ------------------------------------------ implement FifoConnection ------------------------------------------
 
-func (f *fifoConnection) FD() (readerFD int, writerFD int) {
+func (f *fifoConnection) GetFDs() (readerFD int, writerFD int) {
 	return f.reader.FD(), f.writer.FD()
 }
 
-func (f *fifoConnection) Path() (readerPath string, writerPath string) {
+func (f *fifoConnection) GetPaths() (readerPath string, writerPath string) {
 	return f.reader.Path(), f.writer.Path()
 }
 
-func (f *fifoConnection) Reader() ReadFifo {
+func (f *fifoConnection) GetReader() FifoReader {
 	return f.reader
 }
 
-func (f *fifoConnection) Writer() WriteFifo {
+func (f *fifoConnection) GetWriter() FifoWriter {
 	return f.writer
 }
 
@@ -83,6 +87,9 @@ func (f *fifoConnection) Write(b []byte) (n int, err error) {
 }
 
 func (f *fifoConnection) SetOnFifoTransfer(onFifoTransfer OnFifoTransfer) error {
+	if onFifoTransfer != nil {
+		f.onFifoTransferCallback.Store(onFifoTransfer)
+	}
 	return nil
 }
 
@@ -100,7 +107,7 @@ func (f *fifoConnection) init(readerPath string, writerPath string, opts *option
 		return err
 	}
 	// switch onFifoRead to onFifoTransfer
-	f.reader.SetOnFifoRead(func(ctx context.Context, fifo ReadFifo) error {
+	f.reader.SetOnFifoRead(func(ctx context.Context, fifo FifoReader) error {
 		return opts.onFifoTransfer(ctx, f)
 	})
 	if err = f.writer.init(writerPath, opts); err != nil {
