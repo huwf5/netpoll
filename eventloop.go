@@ -37,12 +37,25 @@ type EventLoop interface {
 	ServeFifo() error
 	ServeAll(ln net.Listener) error
 
+	// GetFifoManager is used to get the fifo manager.
+	GetFifoManager() (*fifoManager, error)
+}
+
+type FifoManager interface {
 	// AttachReadFifo is used to attach a fifo connection to the event loop.
 	AttachReadFifo(path string) error
 
 	// GenerateWriteFifo is used to generate a fifo writer.
 	GenerateWriteFifo(path string) (FifoWriter, error)
+
+	// AttachFifoConnection is used to attach a fifo connection to the event loop.
 	AttachFifoConnection(readerPath string, writerPath string) error
+
+	// GetFifoConnectionByReaderPath is used to get a fifo connection by reader path.
+	GetFifoConnectionByReaderPath(readerPath string) (FifoConnection, error)
+
+	// GetFifoConnections is used to get all fifo connections.
+	GetFifoConnections() ([]FifoConnection, error)
 }
 
 /* The Connection Callback Sequence Diagram

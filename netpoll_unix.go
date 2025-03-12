@@ -283,23 +283,11 @@ func (evl *eventLoop) checkQuit(err error) {
 	}
 }
 
-func (evl *eventLoop) AttachReadFifo(path string) error {
-	if evl.fifoManager == nil {
-		return errors.New("fifo manager not initialized")
-	}
-	return evl.fifoManager.AttachReadFifo(path)
-}
-
-func (evl *eventLoop) GenerateWriteFifo(path string) (FifoWriter, error) {
+func (evl *eventLoop) GetFifoManager() (*fifoManager, error) {
+	evl.Lock()
+	defer evl.Unlock()
 	if evl.fifoManager == nil {
 		return nil, errors.New("fifo manager not initialized")
 	}
-	return evl.fifoManager.GenerateWriteFifo(path)
-}
-
-func (evl *eventLoop) AttachFifoConnection(readerPath string, writerPath string) error {
-	if evl.fifoManager == nil {
-		return errors.New("fifo manager not initialized")
-	}
-	return evl.fifoManager.AttachFifoConnection(readerPath, writerPath)
+	return evl.fifoManager, nil
 }

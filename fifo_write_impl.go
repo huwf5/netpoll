@@ -2,6 +2,7 @@ package netpoll
 
 import (
 	"context"
+	"errors"
 	"os"
 	"syscall"
 	"time"
@@ -117,6 +118,9 @@ func (f *writeFifo) SetWriteTimeout(timeout time.Duration) error {
 
 // ------------------------------------------ private methods ------------------------------------------
 
+// init initializes the writeFifo.
+// note: you need to make sure the reader side is already opened
+// or it will get an "no such device or address" error
 func (f *writeFifo) init(path string, opts *options) error {
 	f.path = path
 
@@ -162,7 +166,7 @@ func (f *writeFifo) initFinalizer() {
 		f.operator.Free()
 
 		// close fd
-		if !f.detaching && f.fd > 2 {
+		if !f.closing.Load() && f.fd > 2 {
 			err := syscall.Close(f.fd)
 			if err != nil {
 				logger.Printf("NETPOLL: FIFO close fd failed: %v", err)
@@ -263,7 +267,10 @@ func (f *writeFifo) closeCallback(needLock, needDetach bool) (err error) {
 	}
 	if needDetach && f.operator.poll != nil {
 		if err := f.operator.Control(PollDetach); err != nil {
-			logger.Printf("NETPOLL: closeCallback[%v,%v] detach operator failed: %v", needLock, needDetach, err)
+			// ignore the error if the fd is not attached to the poller
+			if !errors.Is(err, syscall.ENOENT) {
+				logger.Printf("NETPOLL: closeCallback[%v,%v] detach operator failed: %v", needLock, needDetach, err)
+			}
 		}
 	}
 	latest := f.closeCallbacks.Load()

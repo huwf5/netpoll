@@ -1,34 +1,19 @@
 package netpoll
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
-
-// TODO:
-// - [] test ReadFifo
-// - [] test WriteFifo
-// - [] test FifoConnection
-// - [] test FifoManager
-// - [] test EventLoop's interface for fifo
-
-// import (
-// 	"bytes"
-// 	"context"
-// 	"fmt"
-// 	"os"
-// 	"path/filepath"
-// 	"sync"
-// 	"sync/atomic"
-// 	"syscall"
-// 	"testing"
-// 	"time"
-// )
 
 func beforeTest() (dir string) {
 	// create tmp fifo file
@@ -43,8 +28,26 @@ func afterTest(dir string) {
 	os.RemoveAll(dir)
 }
 
-// TestReadFifo tests the fifoReader's read functionality
-// it will read the messages from the fifo file and check if the messages are received in the correct order
+// TestReadFifo tests the fifoReader's read functionality in a dynamic environment.
+//
+// This test verifies that:
+// 1. An EventLoop can be started with ServeFifo() and run in the background
+// 2. A ReadFifo can be dynamically attached to a running EventLoop
+// 3. Data written to the FIFO is correctly read and processed by the onFifoRead callback
+// 4. Multiple messages of varying sizes can be processed sequentially
+// 5. All messages are received completely and in the correct order
+//
+// The test flow:
+// - Creates a temporary FIFO file
+// - Starts an EventLoop with a custom onFifoRead callback
+// - Attaches a ReadFifo to the running EventLoop
+// - Writes multiple test messages to the FIFO
+// - Verifies all messages are received and processed correctly
+// - Shuts down the EventLoop cleanly
+//
+// This demonstrates the ability to dynamically add FIFO handlers to a running
+// EventLoop, which is important for applications that need to manage multiple
+// FIFO connections that may come and go during runtime.
 func TestReadFifo(t *testing.T) {
 	dir := beforeTest()
 	defer afterTest(dir)
@@ -67,6 +70,8 @@ func TestReadFifo(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(expectedMessages)
 
+	// add a counter to track the processed messages
+	var processedMessages atomic.Int32
 	// set options
 	opts := &options{}
 	// reading logic
@@ -82,9 +87,18 @@ func TestReadFifo(t *testing.T) {
 		MustNil(t, err)
 		Equal(t, n, len(data))
 
+		// logger.Printf("DEBUG: received message: %s", string(data[:n]))
+
 		// send data to channel
 		dataReceived <- data[:n]
 		wg.Done() // mark the one message is received
+
+		// increment the counter
+		processedMessages.Add(1)
+		if processedMessages.Load() == int32(expectedMessages) {
+			// logger.Printf("DEBUG: all messages are received")
+			return fifo.Close()
+		}
 		return nil
 	}
 
@@ -101,7 +115,9 @@ func TestReadFifo(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// attach the fifoReader to the event loop
-	MustNil(t, evl.AttachReadFifo(fifoPath))
+	fifoManager, err := evl.GetFifoManager()
+	MustNil(t, err)
+	MustNil(t, fifoManager.AttachReadFifo(fifoPath))
 
 	// write to fifo
 	go func() {
@@ -158,208 +174,686 @@ func TestReadFifo(t *testing.T) {
 
 }
 
-// func TestFifoBasicReadWrite(t *testing.T) {
-// 	dir := beforeTest()
-// 	defer afterTest(dir)
+// TestWriteFifo tests the fifoWriter's write functionality in a dynamic environment.
+//
+// This test verifies that:
+// 1. An EventLoop can be started with ServeFifo() and run in the background
+// 2. A WriteFifo can be dynamically generated and used
+// 3. Data written to the WriteFifo can be correctly read from the FIFO file
+// 4. Multiple messages of varying sizes can be written sequentially
+// 5. All messages are written completely and can be read in the correct order
+//
+// The test flow:
+// - Creates a temporary FIFO file
+// - Starts an EventLoop
+// - Generates a WriteFifo using the EventLoop
+// - Writes multiple test messages to the WriteFifo
+// - Reads the messages from the FIFO file and verifies they match the original messages
+// - Shuts down the EventLoop cleanly
+func TestBasicWriteFifo(t *testing.T) {
+	dir := beforeTest()
+	defer afterTest(dir)
 
-// 	fifoPath := filepath.Join(dir, "fifo")
+	fifoPath := filepath.Join(dir, "writeFifo")
+	// create fifo file
+	MustNil(t, syscall.Mkfifo(fifoPath, 0666))
 
-// 	// test data
-// 	testData := []byte("hello, world")
+	// Test messages to write
+	testMessages := []string{
+		"First message from writer",
+		"Second message with more data from writer",
+		"Third message from writer",
+		"Fourth message is longer to test different buffer sizes from writer",
+		"Fifth message is the last one from writer",
+	}
+	expectedMessages := len(testMessages)
 
-// 	var wg sync.WaitGroup
-// 	wg.Add(2)
+	// sync channel
+	eventLoopDone := make(chan struct{})
+	readerReady := make(chan struct{})
+	writerReady := make(chan struct{})
+	dataReceived := make(chan []byte, expectedMessages)
 
-// 	// read task
-// 	go func() {
-// 		defer wg.Done()
+	// set options
+	opts := &options{}
+	evl, err := NewEventLoop(opts.onRequest)
+	MustNil(t, err)
 
-// 		// create fifo
-// 		readFifo := new(fifo)
-// 		err := readFifo.init(fifoPath, FifoModeRead, &options{})
-// 		if err != nil {
-// 			t.Errorf("failed to init fifo: %v", err)
-// 			return
-// 		}
-// 		defer readFifo.Close()
+	// start the event loop for fifoWriter
+	go func() {
+		defer close(eventLoopDone)
+		MustNil(t, evl.ServeFifo())
+	}()
 
-// 		// wait for write task to be ready since it's non-blocking
-// 		time.Sleep(200 * time.Millisecond)
+	// wait for the event loop to get ready
+	time.Sleep(100 * time.Millisecond)
 
-// 		// read data
-// 		buf := make([]byte, len(testData))
-// 		n, err := readFifo.Read(buf)
-// 		if err != nil {
-// 			t.Errorf("failed to read data: %v", err)
-// 			return
-// 		}
-// 		if n != len(testData) || !bytes.Equal(buf, testData) {
-// 			t.Errorf("read data mismatch: expected %v, got %v", testData, buf[:n])
-// 		}
-// 	}()
+	var wg sync.WaitGroup
+	wg.Add(expectedMessages)
 
-// 	// write task
-// 	go func() {
-// 		defer wg.Done()
+	// start the reader first, to make sure the writer can write to the fifo
+	go func() {
+		f, err := os.OpenFile(fifoPath, os.O_RDONLY|syscall.O_NONBLOCK, 0666)
+		MustNil(t, err)
+		defer f.Close()
 
-// 		// wait for read task to be ready
-// 		time.Sleep(100 * time.Millisecond)
+		// switch to blocking mode to normal read
+		syscall.SetNonblock(int(f.Fd()), false)
 
-// 		// create fifo
-// 		writeFifo := new(fifo)
-// 		err := writeFifo.init(fifoPath, FifoModeWrite, &options{})
-// 		if err != nil {
-// 			t.Errorf("failed to init fifo: %v", err)
-// 			return
-// 		}
-// 		defer writeFifo.Close()
+		// signal the reader is ready
+		close(readerReady)
 
-// 		// write data
-// 		n, err := writeFifo.Write(testData)
-// 		if err != nil {
-// 			t.Errorf("failed to write data: %v", err)
-// 			return
-// 		}
-// 		if n != len(testData) {
-// 			t.Errorf("write data length mismatch: expected %d, got %d", len(testData), n)
-// 		}
-// 	}()
+		// wait for the writer to be ready
+		<-writerReady
 
-// 	wg.Wait()
-// }
+		// Read data using a scanner to handle line-by-line reading
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := scanner.Bytes()
+			if len(line) > 0 {
+				// Make a copy of the data to avoid scanner buffer reuse issues
+				dataCopy := make([]byte, len(line))
+				copy(dataCopy, line)
 
-// func TestFifoWrite(t *testing.T) {
-// 	dir := beforeTest()
-// 	defer afterTest(dir)
+				dataReceived <- dataCopy
+				wg.Done()
+			}
+		}
 
-// 	fifoPath := filepath.Join(dir, "fifo_write")
-// 	opts := &options{}
+		MustNil(t, scanner.Err())
+	}()
 
-// 	cycle, caps := 10000, 256
-// 	msg, buf := make([]byte, caps), make([]byte, caps)
-// 	var wg sync.WaitGroup
-// 	wg.Add(1)
-// 	var count int32
-// 	expect := int32(cycle * caps)
-// 	opts.onData = func(ctx context.Context, fifo Fifo) error {
-// 		n, err := fifo.Read(buf)
-// 		MustNil(t, err)
-// 		if atomic.AddInt32(&count, int32(n)) >= expect {
-// 			wg.Done()
-// 		}
-// 		return nil
-// 	}
-// 	r, w := &fifo{}, &fifo{}
-// 	err := r.init(fifoPath, FifoModeRead, opts)
-// 	MustNil(t, err)
-// 	err = w.init(fifoPath, FifoModeWrite, opts)
-// 	MustNil(t, err)
+	select {
+	case <-readerReady:
+		// success
+	case <-time.After(1 * time.Second):
+		t.Fatalf("timeout waiting for reader to be ready")
+	}
 
-// 	for i := 0; i < cycle; i++ {
-// 		n, err := w.Write(msg)
-// 		MustNil(t, err)
-// 		Equal(t, n, len(msg))
-// 	}
-// 	wg.Wait()
-// 	Equal(t, atomic.LoadInt32(&count), expect)
+	// Generate a WriteFifo using the EventLoop
+	fifoManager, err := evl.GetFifoManager()
+	MustNil(t, err)
+	fifoWriter, err := fifoManager.GenerateWriteFifo(fifoPath)
+	MustNil(t, err)
+	// signal the writer is ready
+	close(writerReady)
 
-// 	r.Close()
-// }
+	for i, msg := range testMessages {
+		n, err := fifoWriter.Write([]byte(msg))
+		MustNil(t, err)
+		Equal(t, n, len(msg))
 
-// func TestFifoLargeWrite(t *testing.T) {
-// 	dir := beforeTest()
-// 	defer afterTest(dir)
+		if i < len(testMessages) {
+			_, err := fifoWriter.Write([]byte("\n"))
+			MustNil(t, err)
+		}
 
-// 	fmt.Println("start testing Write event in epoll_wait")
-// 	totalSize := 1024 * 1024 * 10 // 10MB
-// 	readSize := 1024              // 1KB
+		// wait for the reader to receive the message
+		time.Sleep(10 * time.Millisecond)
+	}
 
-// 	fifoPath := filepath.Join(dir, "fifo_large_write")
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
 
-// 	var wg sync.WaitGroup
-// 	wg.Add(1)
+	select {
+	case <-done:
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for fifoWriter to finish")
+	}
 
-// 	// trace read/write process
-// 	var totalRead int64
+	// close the fifoWriter
+	MustNil(t, fifoWriter.Close())
 
-// 	opts := &options{}
-// 	opts.onData = func(ctx context.Context, fifo Fifo) error {
-// 		if fifo.Reader().Len() > 0 {
-// 			var size int
-// 			if fifo.Reader().Len() > readSize {
-// 				size = readSize
-// 			} else {
-// 				size = fifo.Reader().Len()
-// 			}
-// 			_, err := fifo.Reader().Next(size)
-// 			MustNil(t, err)
-// 			fifo.Reader().Release()
-// 			newTotalRead := atomic.AddInt64(&totalRead, int64(size))
+	// collect the received messages
+	close(dataReceived)
+	receivedMessages := make([]string, 0, expectedMessages)
+	for data := range dataReceived {
+		receivedMessages = append(receivedMessages, string(data))
+	}
 
-// 			time.Sleep(3 * time.Millisecond)
+	Equal(t, len(receivedMessages), expectedMessages)
 
-// 			if newTotalRead >= int64(totalSize) {
-// 				wg.Done()
-// 			}
-// 		}
-// 		return nil
-// 	}
+	sort.Strings(receivedMessages)
+	sort.Strings(testMessages)
 
-// 	r, w := &fifo{}, &fifo{}
-// 	err := r.init(fifoPath, FifoModeRead, opts)
-// 	MustNil(t, err)
-// 	err = w.init(fifoPath, FifoModeWrite, opts)
-// 	MustNil(t, err)
-// 	fmt.Printf("readFifo: %d, writeFifo: %d\n", r.FD(), w.FD())
+	for i, msg := range receivedMessages {
+		Equal(t, msg, testMessages[i])
+	}
 
-// 	// set fifo buffer size to 64KB
-// 	syscall.Syscall(syscall.SYS_FCNTL, uintptr(r.FD()), syscall.F_SETPIPE_SZ, uintptr(65536)) // 64KB
+	// Shutdown the event loop
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	MustNil(t, evl.Shutdown(ctx))
 
-// 	largeMsg := make([]byte, totalSize)
-// 	fmt.Println("Start writing large message")
+	// wait for the event loop to finish
+	select {
+	case <-eventLoopDone:
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for event loop to finish")
+	}
 
-// 	n, err := w.Write(largeMsg)
-// 	MustNil(t, err)
-// 	Equal(t, n, len(largeMsg))
+}
 
-// 	wg.Wait()
+// TestWriteFifoInEpoll tests the WriteFifo functionality when registered in epoll.
+//
+// This test verifies that:
+// 1. A WriteFifo can be properly registered in epoll when writing large data
+// 2. Data written to the WriteFifo can be correctly read by a ReadFifo
+// 3. The entire data transfer process works correctly under epoll monitoring
+// 4. The WriteFifo can be properly closed and detached from epoll
+//
+// The test flow:
+// - Creates a temporary FIFO file
+// - Sets up an EventLoop with a ReadFifo callback
+// - Attaches a ReadFifo to the EventLoop
+// - Generates a WriteFifo using the EventLoop
+// - Writes a large message (10MB) to ensure the WriteFifo is registered in epoll
+// - Verifies all data is correctly read by the ReadFifo
+// - Properly closes all resources and shuts down the EventLoop
+func TestWriteFifoInEpoll(t *testing.T) {
+	dir := beforeTest()
+	defer afterTest(dir)
 
-// 	fmt.Println("Total read: ", totalRead)
-// 	fmt.Println("should read all data: ", totalRead == int64(totalSize))
-// 	r.Close()
-// 	w.Close()
-// }
+	// use large data size to make sure the writeFifo is in epoll
+	totalSize := 1024 * 1024 * 10 // 10MB
+	readChunkSize := 1024 * 64    // 64KB
 
-// func TestFifoRead(t *testing.T) {
-// 	dir := beforeTest()
-// 	defer afterTest(dir)
+	fifoPath := filepath.Join(dir, "fifo_epoll_write")
 
-// 	fifoPath := filepath.Join(dir, "fifo_read")
-// 	r, w := &fifo{}, &fifo{}
-// 	err := r.init(fifoPath, FifoModeRead, nil)
-// 	MustNil(t, err)
-// 	err = w.init(fifoPath, FifoModeWrite, nil)
-// 	MustNil(t, err)
+	// sync channel
+	eventLoopDone := make(chan struct{})
+	readCompleted := make(chan struct{})
 
-// 	size, cycleTime := 256, 10000
-// 	msg := make([]byte, size)
-// 	var wg sync.WaitGroup
-// 	wg.Add(1)
-// 	go func() {
-// 		defer wg.Done()
-// 		for i := 0; i < cycleTime; i++ {
-// 			buf, err := r.Reader().Next(size)
-// 			MustNil(t, err)
-// 			Equal(t, len(buf), size)
-// 			r.Reader().Release()
-// 		}
-// 	}()
-// 	for i := 0; i < cycleTime; i++ {
-// 		n, err := w.Write(msg)
-// 		MustNil(t, err)
-// 		Equal(t, n, len(msg))
-// 	}
+	// trace read process
+	var totalRead int64
 
-// 	wg.Wait()
-// 	r.Close()
-// }
+	// set options
+	opts := &options{}
+	opts.onFifoRead = func(ctx context.Context, fifo FifoReader) error {
+		if fifo.Reader().Len() == 0 {
+			return nil
+		}
+
+		// determine the read size
+		readSize := readChunkSize
+		if fifo.Reader().Len() < readSize {
+			readSize = fifo.Reader().Len()
+		}
+
+		data, err := fifo.Reader().Next(readSize)
+		MustNil(t, err)
+
+		Equal(t, len(data), readSize)
+		// release the reader
+		fifo.Reader().Release()
+
+		newTotalRead := atomic.AddInt64(&totalRead, int64(len(data)))
+
+		// check if all data is read
+		if newTotalRead >= int64(totalSize) {
+			close(readCompleted)
+			return fifo.Close()
+		}
+		return nil
+	}
+	evl, err := NewEventLoop(opts.onRequest, WithOnFifoRead(opts.onFifoRead))
+	MustNil(t, err)
+
+	// start the event loop
+	go func() {
+		defer close(eventLoopDone)
+		MustNil(t, evl.ServeFifo())
+	}()
+
+	// wait for the event loop to get ready
+	time.Sleep(100 * time.Millisecond)
+
+	// start the reader
+	fifoManager, err := evl.GetFifoManager()
+	MustNil(t, err)
+	MustNil(t, fifoManager.AttachReadFifo(fifoPath))
+
+	// start the writer
+	fifoWriter, err := fifoManager.GenerateWriteFifo(fifoPath)
+	MustNil(t, err)
+
+	// create a large message
+	largeMsg := make([]byte, totalSize)
+	for i := 0; i < totalSize; i++ {
+		largeMsg[i] = byte(i % 256)
+	}
+
+	n, err := fifoWriter.Write(largeMsg)
+	MustNil(t, err)
+	Equal(t, n, len(largeMsg))
+
+	select {
+	case <-readCompleted:
+		// success
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout waiting for read to complete")
+	}
+
+	Equal(t, totalRead, int64(totalSize))
+
+	// close fifoWriter
+	MustNil(t, fifoWriter.Close())
+
+	// close the event loop
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	MustNil(t, evl.Shutdown(ctx))
+
+	// wait for the event loop to finish
+	select {
+	case <-eventLoopDone:
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for event loop to finish")
+	}
+}
+
+// TestFifoConnection tests the bidirectional communication using FIFO connections.
+// It creates two FIFOs for bidirectional communication:
+// - readerPath: used by the server to read requests from the client
+// - writerPath: used by the server to write responses to the client
+//
+// The test simulates a client-server interaction where:
+// 1. The client sends requests through readerPath
+// 2. The server reads requests from readerPath
+// 3. The server processes requests and sends responses through writerPath
+// 4. The client reads responses from writerPath
+//
+// Note: When opening FIFOs in non-blocking mode, the first read might encounter EOF
+// until the opposite writer is ready. A small delay is added between writing the
+// request and reading the response to allow the server to process the request and
+// initialize its writer.
+func TestFifoConnection(t *testing.T) {
+	dir := beforeTest()
+	defer afterTest(dir)
+
+	// create fifo path
+	readerPath := filepath.Join(dir, "fifo_connection_reader")
+	writerPath := filepath.Join(dir, "fifo_connection_writer")
+
+	// create fifo
+	MustNil(t, syscall.Mkfifo(readerPath, 0666))
+	MustNil(t, syscall.Mkfifo(writerPath, 0666))
+
+	testRequests := []string{
+		"hello",
+		"test",
+		"ping",
+		"last message",
+	}
+	expectedResponses := []string{
+		"hello world",
+		"test response",
+		"ping pong",
+		"last message received",
+	}
+
+	expectedMessages := len(testRequests)
+
+	// sync channel
+	eventLoopDone := make(chan struct{})
+	clientDone := make(chan struct{})
+
+	var wg sync.WaitGroup
+	wg.Add(expectedMessages)
+
+	// track the processed messages
+	var processedMessages atomic.Int32
+
+	// set options
+	opts := &options{}
+	opts.onFifoTransfer = func(ctx context.Context, fifo FifoConnection) error {
+		// fmt.Println("=========== in onFifoTransfer ===========")
+
+		// read data
+		fifoReader := fifo.GetReader()
+		if fifoReader == nil {
+			// fmt.Println("ERROR: fifoReader is nil")
+			return errors.New("fifoReader is nil")
+		}
+
+		if fifoReader.Reader().Len() == 0 {
+			// fmt.Println("No data to read")
+			return nil
+		}
+
+		data := make([]byte, fifoReader.Reader().Len())
+		// fmt.Printf("Reading %d bytes from fifo\n", len(data))
+		n, err := fifoReader.Read(data)
+		MustNil(t, err)
+
+		request := string(data[:n])
+		// fmt.Printf("Received request: %s\n", request)
+		var response string
+		switch request {
+		case "hello":
+			response = "hello world"
+		case "test":
+			response = "test response"
+		case "ping":
+			response = "ping pong"
+		case "last message":
+			response = "last message received"
+		default:
+			response = "unknown request: " + request
+		}
+
+		// Check if writer is ready
+		if !fifo.IsWriterReady() {
+			// fmt.Println("Writer not ready, trying to initialize")
+			if err := fifo.TryInitWriter(); err != nil {
+				// fmt.Printf("Failed to initialize writer: %v\n", err)
+				return err
+			}
+		}
+
+		// write response
+		// fmt.Printf("Writing response: %s\n", response)
+		_, err = fifo.Write([]byte(response))
+		if err != nil {
+			// fmt.Printf("Error writing to fifo: %v\n", err)
+			return err
+		}
+
+		processedMessages.Add(1)
+		if processedMessages.Load() == int32(expectedMessages) {
+			return fifo.Close()
+		}
+		// fmt.Println("=========== end of onFifoTransfer ===========")
+		return nil
+	}
+
+	evl, err := NewEventLoop(opts.onRequest, WithOnFifoTransfer(opts.onFifoTransfer))
+	MustNil(t, err)
+
+	go func() {
+		defer close(eventLoopDone)
+		MustNil(t, evl.ServeFifo()) // block here
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// attach the fifo connection to the event loop
+	fifoManager, err := evl.GetFifoManager()
+	MustNil(t, err)
+	MustNil(t, fifoManager.AttachFifoConnection(readerPath, writerPath))
+
+	// imitate the client
+	go func() {
+		// fmt.Println("Starting client")
+		defer close(clientDone)
+
+		// open the client writer - using non-blocking mode
+		clientWriter, err := os.OpenFile(readerPath, os.O_WRONLY|syscall.O_NONBLOCK, 0666)
+		if err != nil {
+			// fmt.Printf("Failed to open client writer: %v\n", err)
+			t.Error(err)
+			return
+		}
+		defer clientWriter.Close()
+
+		// open the client reader - using non-blocking mode
+		clientReader, err := os.OpenFile(writerPath, os.O_RDONLY|syscall.O_NONBLOCK, 0666)
+		if err != nil {
+			// fmt.Printf("Failed to open client reader: %v\n", err)
+			t.Error(err)
+			return
+		}
+		defer clientReader.Close()
+
+		// use blocking mode to read
+		MustNil(t, syscall.SetNonblock(int(clientReader.Fd()), false))
+
+		responseBuf := make([]byte, 1024)
+		for i, request := range testRequests {
+			// send request
+			// fmt.Printf("Sending request: %s\n", request)
+			_, err := clientWriter.WriteString(request)
+			MustNil(t, err)
+
+			// TODO: first read will encounter EOF, because the opposite writer is not ready
+			// the client reader will encounter EOF until the opposite writer is ready
+
+			time.Sleep(10 * time.Millisecond) // wait for the response
+			n, err := clientReader.Read(responseBuf)
+			if err != nil {
+				// fmt.Printf("Client reader read error: %v\n", err)
+				t.Error(err)
+				return
+			}
+			if n <= 0 {
+				t.Error("No data read from response")
+				return
+			}
+
+			response := string(responseBuf[:n])
+			// fmt.Printf("Received response: %s\n", response)
+
+			Equal(t, response, expectedResponses[i])
+			wg.Done()
+
+		}
+		// fmt.Println("Client finished")
+	}()
+
+	// wait for all requests to finish
+	// fmt.Println("Waiting for all requests to complete")
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		// fmt.Println("All requests completed")
+		close(done)
+	}()
+
+	// fmt.Println("Waiting for test to complete")
+	select {
+	case <-done:
+		// fmt.Println("Test completed successfully")
+	case <-time.After(5 * time.Second):
+		// fmt.Println("Timeout waiting for fifo connection to finish")
+		t.Fatalf("Timeout waiting for fifo connection to finish")
+	}
+
+	// wait for the client to finish
+	// fmt.Println("Waiting for client to finish")
+	<-clientDone
+	// fmt.Println("Client finished")
+
+	// shutdown the event loop
+	// fmt.Println("Shutting down event loop")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	MustNil(t, evl.Shutdown(ctx))
+
+	// wait for the event loop to finish
+	select {
+	case <-eventLoopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Timeout waiting for event loop to finish")
+	}
+}
+
+// TestFifoConnectionCommunication tests bidirectional communication between two FifoConnections.
+//
+// This test verifies that:
+// 1. Two FifoConnections can be created and managed by a single EventLoop
+// 2. Each FifoConnection can both read and write data
+// 3. Messages can be exchanged bidirectionally between the connections
+// 4. The onFifoTransfer callback correctly processes incoming messages and sends responses
+// 5. All messages are received completely and in the correct order
+//
+// The test flow:
+// - Creates two FIFO files for bidirectional communication
+// - Sets up an EventLoop with a custom onFifoTransfer callback
+// - Attaches two FifoConnections to the EventLoop
+// - Initiates communication by sending a message from connection A
+// - Each connection responds to received messages by sending the next message
+// - Verifies all messages are exchanged correctly
+// - Properly closes all resources and shuts down the EventLoop
+//
+// This demonstrates how two FifoConnections can communicate with each other
+// through a single EventLoop, which is useful for applications that need to
+// manage multiple bidirectional FIFO connections.
+func TestFifoConnectionCommunication(t *testing.T) {
+	dir := beforeTest()
+	defer afterTest(dir)
+
+	// create fifo path
+	fifoAtoB := filepath.Join(dir, "fifo_connection_a_to_b")
+	fifoBtoA := filepath.Join(dir, "fifo_connection_b_to_a")
+
+	// create fifo
+	MustNil(t, syscall.Mkfifo(fifoAtoB, 0666))
+	MustNil(t, syscall.Mkfifo(fifoBtoA, 0666))
+
+	// test messages
+	messagesFromA := []string{
+		"A1: hello B!",
+		"A2: how are you?",
+		"A3: call me later",
+		"A4: bye",
+	}
+	messagesFromB := []string{
+		"B1: hi A!",
+		"B2: I'm fine, thank you!",
+		"B3: ok",
+		"B4: good night",
+	}
+
+	expectedMessages := len(messagesFromA) // A and B send the same number of messages
+
+	// sync channel
+	eventLoopDone := make(chan struct{})
+	communicationDone := make(chan struct{})
+
+	// track the processed messages
+	var messagesProcessedByA atomic.Int32
+	var messagesProcessedByB atomic.Int32
+
+	// set options
+	opts := &options{}
+	opts.onFifoTransfer = func(ctx context.Context, fifo FifoConnection) error {
+		// check if there is data to read
+		fifoReader := fifo.GetReader()
+		if fifoReader == nil || fifoReader.Reader().Len() == 0 {
+			return nil
+		}
+
+		// read data
+		data := make([]byte, fifoReader.Reader().Len())
+		n, err := fifoReader.Read(data)
+		MustNil(t, err)
+
+		message := string(data[:n])
+
+		// determine which connection based on the reader path
+		readerPath := fifo.GetReader().Path()
+
+		if readerPath == fifoAtoB {
+			// this is B's connection, received message from A
+			count := messagesProcessedByB.Add(1)
+
+			// verify message format
+			if !strings.HasPrefix(message, "A") {
+				t.Errorf("B received wrong message format: %s", message)
+			}
+
+			// if B has more messages to send to A
+			idx := int(count) - 1
+			if idx < len(messagesFromB) {
+				// B sends message to A
+				_, err := fifo.Write([]byte(messagesFromB[idx]))
+				MustNil(t, err)
+			}
+		} else {
+			// this is A's connection, received message from B
+			count := messagesProcessedByA.Add(1)
+
+			// verify message format
+			if !strings.HasPrefix(message, "B") {
+				t.Errorf("A received wrong message format: %s", message)
+			}
+
+			// if A has more messages to send to B
+			idx := int(count)
+			if idx < len(messagesFromA) {
+				// A sends message to B
+				_, err := fifo.Write([]byte(messagesFromA[idx]))
+				MustNil(t, err)
+			}
+		}
+
+		// check if all messages are processed
+		if messagesProcessedByA.Load() >= int32(expectedMessages) &&
+			messagesProcessedByB.Load() >= int32(expectedMessages) {
+			close(communicationDone)
+			return fifo.Close()
+		}
+
+		return nil
+	}
+
+	// create a single event loop
+	evl, err := NewEventLoop(nil, WithOnFifoTransfer(opts.onFifoTransfer))
+	MustNil(t, err)
+
+	// start the event loop
+	go func() {
+		defer close(eventLoopDone)
+		MustNil(t, evl.ServeFifo())
+	}()
+
+	// wait for the event loop to get ready
+	time.Sleep(100 * time.Millisecond)
+
+	// attach two FifoConnection to the event loop
+	// A's connection: read messages from B, write messages to B
+	fifoManager, err := evl.GetFifoManager()
+	MustNil(t, err)
+
+	MustNil(t, fifoManager.AttachFifoConnection(fifoBtoA, fifoAtoB))
+	// B's connection: read messages from A, write messages to A
+	MustNil(t, fifoManager.AttachFifoConnection(fifoAtoB, fifoBtoA))
+
+	// start first communication
+	a_FifoConnection, err := fifoManager.GetFifoConnectionByReaderPath(fifoBtoA)
+	MustNil(t, err)
+	_, err = a_FifoConnection.Write([]byte(messagesFromA[0]))
+	MustNil(t, err)
+
+	// wait for communication to finish or timeout
+	select {
+	case <-communicationDone:
+		// success
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for FifoConnection communication to finish")
+	}
+
+	// shutdown the event loop
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	MustNil(t, evl.Shutdown(ctx))
+
+	// wait for the event loop to finish
+	select {
+	case <-eventLoopDone:
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timeout waiting for event loop to finish")
+	}
+
+	// verify all messages are processed
+	Equal(t, messagesProcessedByA.Load(), int32(expectedMessages))
+	Equal(t, messagesProcessedByB.Load(), int32(expectedMessages))
+}

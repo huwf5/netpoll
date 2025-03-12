@@ -1,5 +1,7 @@
 package netpoll
 
+import "sync/atomic"
+
 type FifoMode int
 
 const (
@@ -16,7 +18,7 @@ type baseFifo struct {
 	operator *FDOperator
 
 	// state control
-	detaching bool // atomic operation flag, indicating whether the pipe is detaching
+	closing atomic.Bool
 }
 
 var (
@@ -42,5 +44,5 @@ func (f *baseFifo) Close() error {
 }
 
 func (f *baseFifo) Detach() {
-	f.detaching = true
+	f.closing.Store(true)
 }

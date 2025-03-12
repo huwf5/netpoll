@@ -181,7 +181,7 @@ func (f *readFifo) SetOnFifoRead(onFifoRead OnFifoRead) error {
 
 // ------------------------------------------ private methods ------------------------------------------
 
-// init initializes the read FIFO
+// init initializes the read FIFO and registers the read event in event loop
 // Note: When readFifo is used as part of a FifoConnection,
 // a closure adapter should be used to convert the onFifoTransfer callback to an onFifoRead callback.
 // This way, when readFifo triggers onFifoRead, it will actually call the FifoConnection's onFifoTransfer.
@@ -237,7 +237,7 @@ func (f *readFifo) initFinalizer() {
 		f.operator.Free()
 
 		// close fd
-		if !f.detaching && f.fd > 2 {
+		if !f.closing.Load() && f.fd > 2 {
 			err := syscall.Close(f.fd)
 			if err != nil {
 				logger.Printf("NETPOLL: FIFO close fd failed: %v", err)

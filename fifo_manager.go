@@ -1,6 +1,7 @@
 package netpoll
 
 import (
+	"errors"
 	"sync"
 )
 
@@ -11,16 +12,18 @@ func newFifoManager(opts *options, onQuit func(err error)) *fifoManager {
 	}
 }
 
-// TODO: decide whether to use sync.Map or not
 type fifoManager struct {
+	sync.RWMutex
 	opts   *options
 	onQuit func(err error)
 
 	readFifos       sync.Map // key=fd, value=readFifo
 	writeFifos      sync.Map // key=fd, value=writeFifo
-	fifoConnections sync.Map // key=readerFD, value=fifoConnection
+	fifoConnections sync.Map // key=readerPath, value=fifoConnection
 
 }
+
+var _ FifoManager = &fifoManager{}
 
 // ------------------------------------------ FIFO ------------------------------------------
 
@@ -33,11 +36,13 @@ func (m *fifoManager) AttachReadFifo(path string) error {
 
 	fd := readFifo.FD()
 
+	m.Lock()
 	readFifo.AddCloseCallback(func(fifo BaseFifo) error {
 		m.readFifos.Delete(fd)
 		return nil
 	})
 	m.readFifos.Store(fd, readFifo)
+	m.Unlock()
 
 	// start the handler
 	readFifo.onProcess()
@@ -52,11 +57,13 @@ func (m *fifoManager) GenerateWriteFifo(path string) (FifoWriter, error) {
 
 	fd := writeFifo.FD()
 
+	m.Lock()
 	writeFifo.AddCloseCallback(func(fifo BaseFifo) error {
 		m.writeFifos.Delete(fd)
 		return nil
 	})
 	m.writeFifos.Store(fd, writeFifo)
+	m.Unlock()
 
 	return writeFifo, nil
 }
@@ -67,19 +74,23 @@ func (m *fifoManager) AttachFifoConnection(readerPath string, writerPath string)
 		return err
 	}
 
-	readerFd := fifoConnection.reader.FD()
-
+	m.Lock()
 	fifoConnection.AddCloseCallback(func(fifo FifoConnection) error {
-		m.fifoConnections.Delete(readerFd)
+		m.fifoConnections.Delete(readerPath)
 		return nil
 	})
-	m.fifoConnections.Store(readerFd, fifoConnection)
+	m.fifoConnections.Store(readerPath, fifoConnection)
+	m.Unlock()
 
 	return nil
 }
 
 func (m *fifoManager) Close() error {
 	var err error
+
+	m.Lock()
+	defer m.Unlock()
+
 	// close all read fifos
 	m.readFifos.Range(func(key, value interface{}) bool {
 		if fifo, ok := value.(FifoReader); ok {
@@ -113,4 +124,29 @@ func (m *fifoManager) Close() error {
 		m.onQuit(err)
 	}
 	return err
+}
+
+func (m *fifoManager) GetFifoConnections() ([]FifoConnection, error) {
+	m.RLock()
+	defer m.RUnlock()
+
+	connections := make([]FifoConnection, 0)
+	m.fifoConnections.Range(func(key, value interface{}) bool {
+		if fifo, ok := value.(FifoConnection); ok {
+			connections = append(connections, fifo)
+		}
+		return true
+	})
+	return connections, nil
+}
+
+func (m *fifoManager) GetFifoConnectionByReaderPath(readerPath string) (FifoConnection, error) {
+	m.RLock()
+	defer m.RUnlock()
+
+	value, ok := m.fifoConnections.Load(readerPath)
+	if !ok {
+		return nil, errors.New("fifo connection not found")
+	}
+	return value.(FifoConnection), nil
 }
